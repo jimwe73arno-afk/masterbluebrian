@@ -5,11 +5,14 @@ from dotenv import load_dotenv
 from jarvis_memory import JarvisMemory
 from jarvis_prompts import get_system_prompt
 
-# 1. 頁面基礎設定
+# 頁面設定
 st.set_page_config(page_title="BrotherG Jarvis", page_icon="🧠", layout="wide")
 load_dotenv()
 
-# 2. 初始化 API Key
+# 標題
+st.title("🧠 BrotherG Jarvis - 診斷模式")
+
+# API Key 檢查
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key and "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
@@ -17,108 +20,79 @@ if not api_key and "GEMINI_API_KEY" in st.secrets:
 if not api_key:
     st.error("❌ 找不到 GEMINI_API_KEY，請檢查 Secrets！")
     st.stop()
+else:
+    # 隱碼顯示 Key 的前幾碼，確認有讀到
+    masked_key = api_key[:5] + "..." + api_key[-3:]
+    st.success(f"🔑 API Key 已載入: {masked_key}")
 
 genai.configure(api_key=api_key)
 
-# 3. 智能模型選擇器 (核心修復：自動尋找可用的模型)
-def get_working_model():
-    # 優先順序：2.0 (未來) -> 1.5 Flash Latest (穩定) -> 1.5 Flash (原版) -> Pro (保底)
-    candidates = [
-        "gemini-2.0-flash-exp",      # 嘗試 2025 年新模型
-        "gemini-1.5-flash-latest",   # 強制指向最新版
-        "gemini-1.5-flash",          # 原本設定
-        "gemini-1.5-flash-001",      # 指定版號
-        "gemini-pro"                 # 最後保底
-    ]
-    
-    # 如果已經有選定的可用模型，直接回傳
-    if "valid_model_name" in st.session_state:
-        return genai.GenerativeModel(st.session_state["valid_model_name"])
-
-    # 否則，測試哪個能用
-    for model_name in candidates:
-        try:
-            model = genai.GenerativeModel(model_name)
-            # 試打一個極短的用例確認存活
-            model.generate_content("Hi") 
-            st.session_state["valid_model_name"] = model_name
-            # 在側邊欄偷偷告訴開發者現在用哪顆引擎
-            with st.sidebar:
-                st.caption(f"✅ Engine: {model_name}")
-            return model
-        except Exception:
-            continue
-    
-    st.error("❌ 所有 Gemini 模型都無法連線，請檢查 API Key 配額或專案權限。")
-    st.stop()
-
-# 4. 初始化記憶與模型
+# 初始化記憶
 @st.cache_resource
 def init_memory():
     return JarvisMemory()
 
 try:
     memory = init_memory()
-    model = get_working_model() # 獲取自動測試過可用的模型
+    st.success("📚 Firebase 記憶庫連線成功")
 except Exception as e:
-    st.error(f"🔥 系統啟動失敗: {e}")
+    st.error(f"🔥 Firebase 連線失敗: {e}")
     st.stop()
 
-# 5. UI 佈局
-st.title("🧠 BrotherG Jarvis - 第二大腦")
+# 模型連線測試 (顯示詳細錯誤)
+st.info("🔄 正在嘗試連線 Gemini 模型...")
 
-# 側邊欄
-with st.sidebar:
-    st.header("🔧 功能")
-    if st.button("🗑️ 清除當前對話"):
-        st.session_state["messages"] = []
-        st.rerun()
+candidates = [
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash",
+    "gemini-2.0-flash-exp",
+    "gemini-pro"
+]
 
-# 6. 對話邏輯
+valid_model = None
+error_logs = []
+
+for model_name in candidates:
+    try:
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content("Test")
+        valid_model = model
+        st.success(f"✅ 成功連線模型: **{model_name}**")
+        break
+    except Exception as e:
+        error_msg = str(e)
+        st.warning(f"⚠️ 嘗試 {model_name} 失敗: {error_msg}")
+        error_logs.append(f"{model_name}: {error_msg}")
+
+if not valid_model:
+    st.error("❌ 所有模型連線失敗。請截圖此畫面回報。")
+    with st.expander("查看詳細錯誤日誌"):
+        for log in error_logs:
+            st.code(log)
+    st.stop()
+
+# --- 如果成功連線，下面才是對話介面 ---
+
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
-# 顯示歷史訊息
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# 處理用戶輸入
-if prompt := st.chat_input("與 Jarvis 對話..."):
-    # 顯示用戶訊息
+if prompt := st.chat_input("啟動診斷對話..."):
     st.chat_message("user").markdown(prompt)
     st.session_state["messages"].append({"role": "user", "content": prompt})
 
-    # 產生 AI 回應
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         try:
-            # 檢索記憶
-            related_memories = memory.search_memories(prompt, limit=3)
-            memory_text = "\n".join([f"- {m['content']}" for m in related_memories]) if related_memories else "無相關記憶"
-
-            # 組裝 Prompt
+            # 這裡簡化流程，專注測試生成
             system_prompt = get_system_prompt()
-            full_prompt = f"""
-            {system_prompt}
-            
-            [參考記憶]:
-            {memory_text}
-            
-            [用戶問題]:
-            {prompt}
-            """
-            
-            # 呼叫模型
-            response = model.generate_content(full_prompt)
+            response = valid_model.generate_content(f"{system_prompt}\n\nUser: {prompt}")
             answer = response.text
             
-            # 顯示並儲存
             message_placeholder.markdown(answer)
             st.session_state["messages"].append({"role": "assistant", "content": answer})
-            
-            # 寫入新記憶 (Observations)
-            memory.add_memory(f"User asked: {prompt} -> AI answered: {answer[:50]}...", category="conversation")
-            
         except Exception as e:
-            st.error(f"生成失敗: {e}")
+            st.error(f"生成回應時發生錯誤: {e}")
