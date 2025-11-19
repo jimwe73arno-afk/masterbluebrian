@@ -5,74 +5,89 @@ from dotenv import load_dotenv
 from jarvis_memory import JarvisMemory
 from jarvis_prompts import get_system_prompt
 
-# 頁面設定
 st.set_page_config(page_title="BrotherG Jarvis", page_icon="🧠", layout="wide")
 load_dotenv()
 
-# 標題
-st.title("🧠 BrotherG Jarvis - 診斷模式")
+st.title("🧠 BrotherG Jarvis - 混合動力版")
 
-# API Key 檢查
+# --- API Key ---
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key and "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 
 if not api_key:
-    st.error("❌ 找不到 GEMINI_API_KEY，請檢查 Secrets！")
+    st.error("❌ 找不到 API Key")
     st.stop()
-else:
-    # 隱碼顯示 Key 的前幾碼，確認有讀到
-    masked_key = api_key[:5] + "..." + api_key[-3:]
-    st.success(f"🔑 API Key 已載入: {masked_key}")
 
 genai.configure(api_key=api_key)
 
-# 初始化記憶
+# --- 記憶庫 ---
 @st.cache_resource
 def init_memory():
     return JarvisMemory()
 
 try:
     memory = init_memory()
-    st.success("📚 Firebase 記憶庫連線成功")
+    with st.sidebar:
+        st.caption("✅ Memory: Online")
 except Exception as e:
-    st.error(f"🔥 Firebase 連線失敗: {e}")
+    st.error(f"🔥 Memory Error: {e}")
     st.stop()
 
-# 模型連線測試 (顯示詳細錯誤)
-st.info("🔄 正在嘗試連線 Gemini 模型...")
-
+# --- 模型選擇策略 (關鍵更新) ---
+# 策略：先攻頂 (2.0/Pro)，失敗則守成 (1.5 Flash)
 candidates = [
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
-    "gemini-2.0-flash-exp",
-    "gemini-pro"
+    "gemini-2.0-flash-exp",    # 1. 嘗試最新 (可能 429)
+    "gemini-1.5-pro-002",      # 2. 嘗試最強智商 (可能慢)
+    "gemini-1.5-flash-002",    # 3. 穩定且快 (主力保底)
+    "gemini-1.5-flash",        # 4. 通用標籤 (最後防線)
 ]
 
-valid_model = None
-error_logs = []
+if "valid_model_name" not in st.session_state:
+    st.session_state["valid_model_name"] = None
 
-for model_name in candidates:
-    try:
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content("Test")
-        valid_model = model
-        st.success(f"✅ 成功連線模型: **{model_name}**")
-        break
-    except Exception as e:
-        error_msg = str(e)
-        st.warning(f"⚠️ 嘗試 {model_name} 失敗: {error_msg}")
-        error_logs.append(f"{model_name}: {error_msg}")
+# 自動輪詢
+if not st.session_state["valid_model_name"]:
+    progress_text = "正在測試最佳引擎..."
+    my_bar = st.progress(0, text=progress_text)
+    
+    for i, model_name in enumerate(candidates):
+        try:
+            # 更新進度條
+            my_bar.progress((i + 1) * 25, text=f"正在測試引擎: {model_name}...")
+            
+            model = genai.GenerativeModel(model_name)
+            model.generate_content("Hi") # 測試一發
+            
+            st.session_state["valid_model_name"] = model_name
+            my_bar.empty()
+            st.toast(f"🚀 成功啟動引擎: {model_name}")
+            break
+        except Exception as e:
+            # 如果是 429 (額度爆了)，就默默換下一個
+            continue
 
-if not valid_model:
-    st.error("❌ 所有模型連線失敗。請截圖此畫面回報。")
-    with st.expander("查看詳細錯誤日誌"):
-        for log in error_logs:
-            st.code(log)
+if not st.session_state["valid_model_name"]:
+    st.error("❌ 所有引擎啟動失敗。請檢查 API Key 額度。")
     st.stop()
 
-# --- 如果成功連線，下面才是對話介面 ---
+# 顯示當前使用的引擎
+active_model_name = st.session_state["valid_model_name"]
+active_model = genai.GenerativeModel(active_model_name)
 
+with st.sidebar:
+    st.divider()
+    st.write("🔥 **當前動力核心**")
+    if "2.0" in active_model_name:
+        st.success(f"⚡ {active_model_name} (最新版)")
+    elif "pro" in active_model_name:
+        st.info(f"🧠 {active_model_name} (高智商)")
+    else:
+        st.warning(f"🛡️ {active_model_name} (穩定模式)")
+    
+    st.caption("若顯示穩定模式，代表最新版額度已滿 (429)，系統自動降級以維持運作。")
+
+# --- 對話介面 ---
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
 
@@ -80,19 +95,30 @@ for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if prompt := st.chat_input("啟動診斷對話..."):
+if prompt := st.chat_input("Master Blue 請指示..."):
     st.chat_message("user").markdown(prompt)
     st.session_state["messages"].append({"role": "user", "content": prompt})
 
     with st.chat_message("assistant"):
         message_placeholder = st.empty()
         try:
-            # 這裡簡化流程，專注測試生成
-            system_prompt = get_system_prompt()
-            response = valid_model.generate_content(f"{system_prompt}\n\nUser: {prompt}")
+            # 記憶檢索
+            memories = memory.search_memories(prompt, limit=3)
+            mem_text = "\n".join([f"- {m['content']}" for m in memories]) if memories else "無"
+
+            # Prompt
+            sys_prompt = get_system_prompt()
+            full_prompt = f"{sys_prompt}\n\n[相關記憶]:\n{mem_text}\n\nUser: {prompt}"
+            
+            # 生成
+            response = active_model.generate_content(full_prompt)
             answer = response.text
             
             message_placeholder.markdown(answer)
             st.session_state["messages"].append({"role": "assistant", "content": answer})
+            
+            # 寫入記憶
+            memory.add_memory(f"Q: {prompt} | A: {answer[:30]}...", category="chat")
+            
         except Exception as e:
-            st.error(f"生成回應時發生錯誤: {e}")
+            st.error(f"回答生成失敗: {e}")
